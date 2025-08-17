@@ -1,0 +1,11 @@
+{
+  "name": "ai-article-api",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "type": "commonjs",
+  "dependencies": {
+    "@anzp/azure-function-multipart": "^3.0.3",
+    "node-fetch": "^3.3.2"
+  }
+}

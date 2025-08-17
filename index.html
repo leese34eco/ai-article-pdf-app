@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>현장체험/맛집 기록 → AI 기사문 PDF 생성기 (무로그인)</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net"/>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <!-- jsPDF (브라우저에서 PDF 생성) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js" crossorigin="anonymous"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, "Noto Sans KR", Segoe UI, Roboto, sans-serif; background:#fafafa; color:#111; }
+    header { padding:18px 16px; border-bottom:1px solid #e5e7eb; background:#fff; position:sticky; top:0; }
+    main { max-width: 1000px; margin: 0 auto; padding: 16px; display:grid; gap:16px; }
+    .card { border:1px solid #e5e7eb; border-radius: 12px; padding: 16px; background:#fff; }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+    @media (max-width: 980px){ .grid{ grid-template-columns: 1fr; } }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .muted { opacity:.7; font-size:13px; }
+    textarea { width:100%; min-height: 160px; resize: vertical; }
+    .preview { border:1px dashed #d1d5db; padding: 10px; border-radius:8px; background:#f9fafb; max-height: 360px; overflow:auto; }
+    .btn { border:1px solid #d1d5db; background:#111827; color:#fff; padding:10px 12px; border-radius:8px; cursor:pointer; }
+    .btn.secondary { background:#fff; color:#111; }
+    ul.thumbs { list-style:none; padding:0; margin:0; display:flex; gap:8px; flex-wrap:wrap;}
+    ul.thumbs li { width:100px; height:100px; border:1px solid #e5e7eb; border-radius:8px; overflow:hidden; display:flex; align-items:center; justify-content:center; background:#f3f4f6;}
+    ul.thumbs img { max-width:100%; max-height:100%; }
+    .small { font-size:12px; }
+  </style>
+</head>
+<body>
+<header>
+  <h2>현장체험·맛집 기록 → AI 기사문(PDF)</h2>
+</header>
+
+<main>
+  <div class="card">
+    <div class="grid">
+      <div>
+        <h3>1) 사진 업로드</h3>
+        <input id="files" type="file" accept="image/*" multiple />
+        <p class="muted">최대 10장 권장(모델 제한). 용량이 크면 처리 시간이 길어질 수 있어요.</p>
+        <ul id="thumbs" class="thumbs"></ul>
+
+        <h3>2) 메모/관찰 기록</h3>
+        <textarea id="notes" placeholder="본 것/느낀 점/음식·장소 정보 등을 자유롭게 적어주세요."></textarea>
+        <p class="small muted">※ 서버는 업로드 데이터를 저장하지 않고 즉시 처리 후 폐기합니다.</p>
+
+        <div class="row" style="margin-top:10px;">
+          <button id="generate" class="btn">AI로 생성</button>
+          <span id="status" class="muted"></span>
+        </div>
+      </div>
+
+      <div>
+        <h3>3) 결과 편집</h3>
+        <textarea id="output" placeholder="여기에 AI 결과가 표시됩니다. 필요하면 수정하세요."></textarea>
+
+        <div class="row" style="margin-top:10px;">
+          <button id="downloadPdf" class="btn">PDF(텍스트만) 다운로드</button>
+          <button id="downloadPdfWithImages" class="btn secondary">PDF(사진 포함) 다운로드</button>
+        </div>
+
+        <h4>미리보기</h4>
+        <div id="render" class="preview"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let currentImageDataUrls = [];
+
+  async function filesToDataUrls(fileList){
+    const files = [...fileList];
+    const readers = files.map(f => new Promise((resolve,reject)=>{
+      const fr = new FileReader();
+      fr.onload = () => resolve(fr.result);
+      fr.onerror = reject;
+      fr.readAsDataURL(f);
+    }));
+    return Promise.all(readers);
+  }
+
+  // 썸네일 미리보기 + dataURL 준비
+  $('files').addEventListener('change', async () => {
+    const list = $('thumbs'); list.innerHTML='';
+    const files = $('files').files;
+    currentImageDataUrls = await filesToDataUrls(files);
+    [...files].forEach((file, i) => {
+      const li = document.createElement('li');
+      const img = document.createElement('img');
+      img.src = currentImageDataUrls[i];
+      li.appendChild(img); list.appendChild(li);
+    });
+  });
+
+  // 마크다운 → HTML 미리보기
+  const render = () => { $('render').innerHTML = marked.parse($('output').value || ''); };
+  $('output').addEventListener('input', render);
+
+  // AI 생성
+  $('generate').addEventListener('click', async () => {
+    const files = $('files').files;
+    const notes = $('notes').value.trim();
+    if (!files.length && !notes) {
+      alert('사진 또는 메모 중 하나 이상을 입력해주세요.');
+      return;
+    }
+    const form = new FormData();
+    [...files].forEach(f => form.append('images', f));
+    form.append('notes', notes);
+
+    $('status').textContent = '생성 중... (이미지+텍스트 분석)';
+    const res = await fetch('/api/generate', { method: 'POST', body: form });
+    if (!res.ok) {
+      $('status').textContent = '생성 실패';
+      const t = await res.text();
+      alert('오류: ' + t);
+      return;
+    }
+    const data = await res.json();
+    $('output').value = data.markdown || '';
+    $('status').textContent = '완료';
+    render();
+  });
+
+  // Markdown → 텍스트 기반 PDF
+  $('downloadPdf').addEventListener('click', async () => {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const margin = 56; // 3/4 inch
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const maxWidth = pageWidth - margin*2;
+    let y = margin;
+
+    const write = (text, opts={}) => {
+      const size = opts.size || 12;
+      doc.setFont('Helvetica','normal'); doc.setFontSize(size);
+      const wrapped = doc.splitTextToSize(text, maxWidth);
+      for (const w of wrapped) {
+        if (y + size > pageHeight - margin) { doc.addPage(); y = margin; }
+        doc.text(w, margin, y); y += size + 6;
+      }
+    };
+    const writeHeading = (text, level=1) => {
+      const size = level===1?18:level===2?15:13;
+      if (y + size > pageHeight - margin) { doc.addPage(); y = margin; }
+      doc.setFont('Helvetica','bold'); doc.setFontSize(size);
+      doc.text(text, margin, y); y += size + 8;
+    };
+
+    const lines = ($('output').value || '').split('\n');
+    for (let raw of lines) {
+      const line = raw.trimEnd();
+      if (!line) { y += 6; continue; }
+      if (line.startsWith('# ')) { writeHeading(line.replace(/^#\s+/, ''), 1); continue; }
+      if (line.startsWith('## ')) { writeHeading(line.replace(/^##\s+/, ''), 2); continue; }
+      if (line.startsWith('### ')) { writeHeading(line.replace(/^###\s+/, ''), 3); continue; }
+      if (line.startsWith('- ')) { write('• ' + line.replace(/^- /,'')); continue; }
+      write(line);
+    }
+
+    doc.save('article.pdf');
+  });
+
+  // PDF(사진 포함) — 마지막에 썸네일+캡션 페이지 추가
+  $('downloadPdfWithImages').addEventListener('click', async () => {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const margin = 56;
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const maxWidth = pageWidth - margin*2;
+    let y = margin;
+
+    const write = (text, opts={}) => {
+      const size = opts.size || 12;
+      doc.setFont('Helvetica','normal'); doc.setFontSize(size);
+      const wrapped = doc.splitTextToSize(text, maxWidth);
+      for (const w of wrapped) {
+        if (y + size > pageHeight - margin) { doc.addPage(); y = margin; }
+        doc.text(w, margin, y); y += size + 6;
+      }
+    };
+    const writeHeading = (text, level=1) => {
+      const size = level===1?18:level===2?15:13;
+      if (y + size > pageHeight - margin) { doc.addPage(); y = margin; }
+      doc.setFont('Helvetica','bold'); doc.setFontSize(size);
+      doc.text(text, margin, y); y += size + 8;
+    };
+
+    // 본문 먼저 렌더링
+    const md = $('output').value || '';
+    const lines = md.split('\n');
+    for (let raw of lines) {
+      const line = raw.trimEnd();
+      if (!line) { y += 6; continue; }
+      if (line.startsWith('# ')) { writeHeading(line.replace(/^#\s+/, ''), 1); continue; }
+      if (line.startsWith('## ')) { writeHeading(line.replace(/^##\s+/, ''), 2); continue; }
+      if (line.startsWith('### ')) { writeHeading(line.replace(/^###\s+/, ''), 3); continue; }
+      if (line.startsWith('- ')) { write('• ' + line.replace(/^- /,'')); continue; }
+      write(line);
+    }
+
+    // "사진 캡션" 섹션 파싱(간단 규칙)
+    function extractCaptions(md){
+      const lines = md.split('\n');
+      const idx = lines.findIndex(l => /^##\s*사진\s*캡션/.test(l.trim()));
+      if (idx === -1) return [];
+      const caps = [];
+      for (let i = idx+1; i < lines.length; i++){
+        const t = lines[i];
+        if (/^#{1,6}\s+/.test(t)) break; // 다음 헤딩 만나면 종료
+        const m = t.match(/^[-*]\s+(.*)$/);
+        if (m) caps.push(m[1].trim());
+        else if (t.trim()) caps.push(t.trim());
+      }
+      return caps.filter(Boolean);
+    }
+
+    const captions = extractCaptions(md);
+
+    // 새 페이지에 썸네일+캡션 그리기
+    doc.addPage();
+    y = margin;
+    writeHeading('사진 썸네일과 캡션', 1);
+
+    const col = 2; // 2열 그리드
+    const gap = 12;
+    const thumbW = (maxWidth - gap) / col; // 열 2개 기준 폭
+    const thumbH = 140; // 고정 높이
+
+    const drawImage = (dataUrl, x, y, w, h) => {
+      const mime = (dataUrl.split(';')[0] || '').split(':')[1] || 'image/jpeg';
+      const type = mime.includes('png') ? 'PNG' : 'JPEG';
+      try { doc.addImage(dataUrl, type, x, y, w, h); } catch(e) {}
+    };
+
+    let i = 0;
+    for (const dataUrl of currentImageDataUrls){
+      const cx = margin + (i % col) * (thumbW + gap);
+      const cy = y + Math.floor(i / col) * (thumbH + 40 + gap); // 이미지+캡션 공간
+      if (cy + thumbH + 40 > pageHeight - margin){
+        doc.addPage();
+        y = margin; i = 0; // 열 위치 초기화
+      }
+      const idx = i; // 로컬 인덱스
+      drawImage(dataUrl, margin + (idx % col) * (thumbW + gap), y + Math.floor(idx / col) * (thumbH + 40 + gap), thumbW, thumbH);
+      // 캡션
+      const cap = captions[idx] || `사진 ${idx+1}`;
+      doc.setFont('Helvetica','normal'); doc.setFontSize(11);
+      const capX = margin + (idx % col) * (thumbW + gap);
+      const capY = y + Math.floor(idx / col) * (thumbH + 40 + gap) + thumbH + 14;
+      const wrapped = doc.splitTextToSize(cap, thumbW);
+      wrapped.forEach((line, k) => {
+        doc.text(line, capX, capY + k*14);
+      });
+      i++;
+    }
+
+    doc.save('article_with_photos.pdf');
+  });
+
+  // 초기 렌더
+  render();
+</script>
+</body>
+</html>
